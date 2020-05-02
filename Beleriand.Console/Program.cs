@@ -1,4 +1,5 @@
-﻿using Beleriand.Core.Configurations;
+﻿using System.Collections.Generic;
+using Beleriand.Core.Configurations;
 
 namespace Beleriand.Console
 {
@@ -14,7 +15,8 @@ namespace Beleriand.Console
 
             applicationConfigurationCache.Set("ApplicationConfiguration:1", new ApplicationConfiguration("Ziya", "1"));
 
-            var result = applicationConfigurationCache.GetOrDefault<ApplicationConfiguration>("ApplicationConfiguration:1");
+            var result = applicationConfigurationCache.GetOrDefault<ApplicationConfiguration>(new List<string>
+                {"ApplicationConfiguration:1", "ApplicationConfiguration:2"});
 
             System.Console.WriteLine();
         }

@@ -180,7 +180,7 @@ namespace Beleriand
             {
                 var serializedData = (string) redisValue;
 
-                if (serializedData.Length > 0)
+                if (!string.IsNullOrEmpty(serializedData))
                 {
                     var key = notFoundKeys.ElementAt(newIndex);
                     var value = JsonConvert.DeserializeObject<T>(serializedData);

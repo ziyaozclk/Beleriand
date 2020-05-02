@@ -24,14 +24,18 @@ namespace Beleriand.Core
 
         public Task<T> GetOrDefaultAsync<T>(string key)
         {
-            return Task.FromResult(GetOrDefault<T>(key));
+            var localizedKey = GetLocalizedKey(key);
+
+            return Task.FromResult(GetOrDefault<T>(localizedKey));
         }
 
         public abstract Dictionary<string, T> GetOrDefault<T>(List<string> keys);
 
         public Task<Dictionary<string, T>> GetOrDefaultAsync<T>(List<string> keys)
         {
-            return Task.FromResult(GetOrDefault<T>(keys));
+            var localizedKeys = keys.Select(GetLocalizedKey).ToList();
+
+            return Task.FromResult(GetOrDefault<T>(localizedKeys));
         }
 
         public T Get<T>(string key, Func<string, T> factory)
@@ -155,7 +159,8 @@ namespace Beleriand.Core
 
         public Task SetAsync<T>(string key, T value)
         {
-            Set(key, value);
+            var localizedKey = GetLocalizedKey(key);
+            Set(localizedKey, value);
             return Task.FromResult(0);
         }
 
@@ -171,7 +176,8 @@ namespace Beleriand.Core
 
         public Task RemoveAsync(string key)
         {
-            Remove(key);
+            var localizedKey = GetLocalizedKey(key);
+            Remove(localizedKey);
             return Task.FromResult(0);
         }
 
@@ -183,6 +189,11 @@ namespace Beleriand.Core
             return Task.FromResult(0);
         }
 
+        protected string GetLocalizedKey(string key)
+        {
+            return $"{Name}:{key}";
+        }
+        
         public void Dispose()
         {
             throw new NotImplementedException();
