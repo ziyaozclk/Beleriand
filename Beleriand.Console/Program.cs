@@ -1,41 +1,22 @@
-﻿using System;
-using System.Collections.Generic;
-using StackExchange.Redis;
+﻿using Beleriand.Core.Configurations;
 
 namespace Beleriand.Console
 {
-    class ApplicationConfiguration
-    {
-        public string Name { get; set; }
-        public string Value { get; set; }
-
-        public ApplicationConfiguration(string name, string value)
-        {
-            Name = name;
-            Value = value;
-        }
-    }
-
     class Program
     {
         static void Main(string[] args)
         {
-            var connectionMultiplexer = ConnectionMultiplexer.Connect("localhost");
+            var configuration = new CachingConfiguration();
 
-            MultiLevelCache multiLevelCache =
-                new MultiLevelCache("ApplicationConfiguration", connectionMultiplexer);
+            MultiLevelCacheManager cacheManager = new MultiLevelCacheManager(configuration, "localhost");
 
-            /*
-            var dict = new Dictionary<string, ApplicationConfiguration>();
-            dict.Add("ApplicationConfiguration:1", new ApplicationConfiguration("Ziya","1"));
-            dict.Add("ApplicationConfiguration:2", new ApplicationConfiguration("Ahmet","9"));
+            var applicationConfigurationCache = cacheManager.GetCache("ApplicationConfiguration");
 
-            multiLevelCache.Set(dict);
-            */
-            
-            multiLevelCache.Clear();
-            
-            System.Console.WriteLine("Finito :D");
+            applicationConfigurationCache.Set("ApplicationConfiguration:1", new ApplicationConfiguration("Ziya", "1"));
+
+            var result = applicationConfigurationCache.GetOrDefault<ApplicationConfiguration>("ApplicationConfiguration:1");
+
+            System.Console.WriteLine();
         }
     }
 }

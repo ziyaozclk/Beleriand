@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using Beleriand.Core;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Options;
 using Newtonsoft.Json;
 using StackExchange.Redis;
 
@@ -19,7 +21,7 @@ namespace Beleriand
 
         private long[] _lastUpdated = new long[HashSlotCount];
 
-        public readonly Dictionary<string, LocalCacheEntry<object>> _caches;
+        private MemoryCache _inProcessCache;
 
         private readonly IDatabase _redisDb;
 
@@ -27,7 +29,7 @@ namespace Beleriand
         {
             _redisDb = connectionMultiplexer.GetDatabase();
 
-            _caches = new Dictionary<string, LocalCacheEntry<object>>();
+            _inProcessCache = new MemoryCache(new OptionsWrapper<MemoryCacheOptions>(new MemoryCacheOptions()));
 
             connectionMultiplexer.GetSubscriber()
                 .Subscribe(SyncChannelName, DataSynchronizationMessageHandler);
@@ -69,7 +71,7 @@ namespace Beleriand
                 return;
             }
 
-            _caches.Clear();
+            _inProcessCache = new MemoryCache(new OptionsWrapper<MemoryCacheOptions>(new MemoryCacheOptions()));
 
             lock (_lastUpdated)
             {
@@ -83,18 +85,15 @@ namespace Beleriand
 
             int keyHashSlot = -1;
 
-            if (_caches.TryGetValue(key, out LocalCacheEntry<object> inMemoryValue))
+            if (_inProcessCache.Get(key) is LocalCacheEntry<T> inProcessCacheEntry)
             {
-                if (inMemoryValue is LocalCacheEntry<T> inProcessCacheEntry)
-                {
-                    keyHashSlot = inProcessCacheEntry.KeyHashSlot;
+                keyHashSlot = inProcessCacheEntry.KeyHashSlot;
 
-                    lock (_lastUpdated)
+                lock (_lastUpdated)
+                {
+                    if (_lastUpdated[keyHashSlot] < inProcessCacheEntry.Timestamp)
                     {
-                        if (_lastUpdated[keyHashSlot] < inMemoryValue.Timestamp)
-                        {
-                            return inProcessCacheEntry.Data;
-                        }
+                        return (T) inProcessCacheEntry.Data;
                     }
                 }
             }
@@ -122,7 +121,7 @@ namespace Beleriand
                         keyHashSlot = HashSlotCalculator.CalculateHashSlot(key);
                     }
 
-                    _caches.Add(key, new LocalCacheEntry<object>((ushort) keyHashSlot, timestamp, value));
+                    _inProcessCache.Set(key, new LocalCacheEntry<T>((ushort) keyHashSlot, timestamp, value));
                 }
             }
 
@@ -142,19 +141,16 @@ namespace Beleriand
             int index = 0;
             foreach (var key in keys)
             {
-                if (_caches.TryGetValue(key, out LocalCacheEntry<object> inMemoryValue))
+                if (_inProcessCache.Get(key) is LocalCacheEntry<T> inProcessCacheEntry)
                 {
-                    if (inMemoryValue is LocalCacheEntry<T> inProcessCacheEntry)
-                    {
-                        keyHashSlot = inProcessCacheEntry.KeyHashSlot;
+                    keyHashSlot = inProcessCacheEntry.KeyHashSlot;
 
-                        lock (_lastUpdated)
+                    lock (_lastUpdated)
+                    {
+                        if (_lastUpdated[keyHashSlot] < inProcessCacheEntry.Timestamp)
                         {
-                            if (_lastUpdated[keyHashSlot] < inMemoryValue.Timestamp)
-                            {
-                                foundIndexList.Add(index);
-                                returnMap.Add(key, inProcessCacheEntry.Data);
-                            }
+                            foundIndexList.Add(index);
+                            returnMap.Add(key, inProcessCacheEntry.Data);
                         }
                     }
                 }
@@ -196,7 +192,7 @@ namespace Beleriand
                         keyHashSlot = HashSlotCalculator.CalculateHashSlot(key);
                     }
 
-                    _caches.Add(key, new LocalCacheEntry<object>((ushort) keyHashSlot, timestamp, value));
+                    _inProcessCache.Set(key, new LocalCacheEntry<T>((ushort) keyHashSlot, timestamp, value));
                 }
 
                 newIndex++;
@@ -227,7 +223,7 @@ namespace Beleriand
             scriptArgs[2] = DataSyncMessage.Create(_instanceId, keyHashSlot).Serialize();
 
             _redisDb.ScriptEvaluate(luaScript, new RedisKey[] {key}, scriptArgs);
-            _caches.Add(key, new LocalCacheEntry<object>(keyHashSlot, timestamp, value));
+            _inProcessCache.Set(key, new LocalCacheEntry<T>(keyHashSlot, timestamp, value));
         }
 
         public override void Set<T>(Dictionary<string, T> values)
@@ -261,7 +257,7 @@ namespace Beleriand
 
                 publishScript += $"redis.call('PUBLISH', KEYS[1], ARGV[{insertedIndex}])";
                 scriptArgs[insertedIndex - 1] = DataSyncMessage.Create(_instanceId, keyHashSlot).Serialize();
-                _caches.Add(keyValuePair.Key, new LocalCacheEntry<object>(keyHashSlot, timestamp, keyValuePair.Value));
+                _inProcessCache.Set(keyValuePair.Key, new LocalCacheEntry<object>(keyHashSlot, timestamp, keyValuePair.Value));
 
                 insertedIndex++;
             }
@@ -283,7 +279,7 @@ namespace Beleriand
 
             _redisDb.ScriptEvaluate(luaScript, new RedisKey[] {""}, scriptArgs);
 
-            _caches.Remove(key);
+            _inProcessCache.Remove(key);
         }
 
         public override void Clear()
