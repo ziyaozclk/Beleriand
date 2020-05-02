@@ -3,8 +3,6 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using Beleriand.Core;
-using Microsoft.Extensions.Caching.Memory;
-using Microsoft.Extensions.Options;
 using Newtonsoft.Json;
 using StackExchange.Redis;
 
@@ -17,20 +15,19 @@ namespace Beleriand
         private const string SyncChannelName = "NewtMultilevelCache_Sync";
         private const string ClearSyncChannelName = "NewtMultilevelCacheClear_Sync";
 
-        private readonly Guid _instanceId = Guid.NewGuid();
-
         private long[] _lastUpdated = new long[HashSlotCount];
 
-        private MemoryCache _inProcessCache;
-
         private readonly IDatabase _redisDb;
+        private readonly Dictionary<string, object> _caches;
+
+        private readonly Guid _instanceId = Guid.NewGuid();
 
         public MultiLevelCache(string name, ConnectionMultiplexer connectionMultiplexer) : base(name)
         {
             _redisDb = connectionMultiplexer.GetDatabase();
 
-            _inProcessCache = new MemoryCache(new OptionsWrapper<MemoryCacheOptions>(new MemoryCacheOptions()));
-
+            _caches = new Dictionary<string, object>();
+            
             connectionMultiplexer.GetSubscriber()
                 .Subscribe(SyncChannelName, DataSynchronizationMessageHandler);
             connectionMultiplexer.GetSubscriber()
@@ -71,7 +68,7 @@ namespace Beleriand
                 return;
             }
 
-            _inProcessCache = new MemoryCache(new OptionsWrapper<MemoryCacheOptions>(new MemoryCacheOptions()));
+            _caches.Clear();
 
             lock (_lastUpdated)
             {
@@ -81,11 +78,13 @@ namespace Beleriand
 
         public override T GetOrDefault<T>(string key)
         {
+            key = GetLocalizedKey(key);
+            
             var timestamp = Stopwatch.GetTimestamp() - 1;
 
             int keyHashSlot = -1;
 
-            if (_inProcessCache.Get(key) is LocalCacheEntry<T> inProcessCacheEntry)
+            if (_caches.GetValueOrDefault(key) is LocalCacheEntry<T> inProcessCacheEntry)
             {
                 keyHashSlot = inProcessCacheEntry.KeyHashSlot;
 
@@ -121,7 +120,7 @@ namespace Beleriand
                         keyHashSlot = HashSlotCalculator.CalculateHashSlot(key);
                     }
 
-                    _inProcessCache.Set(key, new LocalCacheEntry<T>((ushort) keyHashSlot, timestamp, value));
+                    _caches.TryAdd(key, new LocalCacheEntry<T>((ushort) keyHashSlot, timestamp, value));
                 }
             }
 
@@ -130,6 +129,8 @@ namespace Beleriand
 
         public override Dictionary<string, T> GetOrDefault<T>(List<string> keys)
         {
+            keys = keys.Select(GetLocalizedKey).ToList();
+            
             Dictionary<string, T> returnMap = new Dictionary<string, T>();
 
             var timestamp = Stopwatch.GetTimestamp() - 1;
@@ -141,7 +142,7 @@ namespace Beleriand
             int index = 0;
             foreach (var key in keys)
             {
-                if (_inProcessCache.Get(key) is LocalCacheEntry<T> inProcessCacheEntry)
+                if (_caches.GetValueOrDefault(key) is LocalCacheEntry<T> inProcessCacheEntry)
                 {
                     keyHashSlot = inProcessCacheEntry.KeyHashSlot;
 
@@ -192,7 +193,7 @@ namespace Beleriand
                         keyHashSlot = HashSlotCalculator.CalculateHashSlot(key);
                     }
 
-                    _inProcessCache.Set(key, new LocalCacheEntry<T>((ushort) keyHashSlot, timestamp, value));
+                    _caches.TryAdd(key, new LocalCacheEntry<T>((ushort) keyHashSlot, timestamp, value));
                 }
 
                 newIndex++;
@@ -205,6 +206,8 @@ namespace Beleriand
         {
             if (string.IsNullOrWhiteSpace(key)) throw new ArgumentNullException(nameof(key));
             if (value == null) throw new ArgumentNullException(nameof(value));
+
+            key = GetLocalizedKey(key);
 
             var timestamp = Stopwatch.GetTimestamp() - 1;
 
@@ -223,7 +226,7 @@ namespace Beleriand
             scriptArgs[2] = DataSyncMessage.Create(_instanceId, keyHashSlot).Serialize();
 
             _redisDb.ScriptEvaluate(luaScript, new RedisKey[] {key}, scriptArgs);
-            _inProcessCache.Set(key, new LocalCacheEntry<T>(keyHashSlot, timestamp, value));
+            _caches.TryAdd(key, new LocalCacheEntry<T>(keyHashSlot, timestamp, value));
         }
 
         public override void Set<T>(Dictionary<string, T> values)
@@ -241,7 +244,7 @@ namespace Beleriand
 
             var multipleValueSetLuaScript = $"redis.call('MSET', {parameters})";
 
-            RedisKey[] redisKeys = values.Keys.Select(a => new RedisKey(a)).ToArray();
+            RedisKey[] redisKeys = values.Keys.Select(a => new RedisKey(GetLocalizedKey(a))).ToArray();
             RedisValue[] redisValues =
                 values.Values.Select(a => new RedisValue(JsonConvert.SerializeObject(a))).ToArray();
 
@@ -253,11 +256,13 @@ namespace Beleriand
             var insertedIndex = 1;
             foreach (var keyValuePair in values)
             {
-                var keyHashSlot = HashSlotCalculator.CalculateHashSlot(keyValuePair.Key);
+                var key = GetLocalizedKey(keyValuePair.Key);
+                
+                var keyHashSlot = HashSlotCalculator.CalculateHashSlot(key);
 
                 publishScript += $"redis.call('PUBLISH', KEYS[1], ARGV[{insertedIndex}])";
                 scriptArgs[insertedIndex - 1] = DataSyncMessage.Create(_instanceId, keyHashSlot).Serialize();
-                _inProcessCache.Set(keyValuePair.Key, new LocalCacheEntry<object>(keyHashSlot, timestamp, keyValuePair.Value));
+                _caches.TryAdd(key, new LocalCacheEntry<object>(keyHashSlot, timestamp, keyValuePair.Value));
 
                 insertedIndex++;
             }
@@ -267,6 +272,8 @@ namespace Beleriand
 
         public override void Remove(string key)
         {
+            key = GetLocalizedKey(key);
+            
             var keyHashSlot = HashSlotCalculator.CalculateHashSlot(key);
 
             var scriptArgs = new RedisValue[2];
@@ -277,9 +284,9 @@ namespace Beleriand
                     redis.call('PUBLISH', ARGV[1], ARGV[2])
                   ";
 
-            _redisDb.ScriptEvaluate(luaScript, new RedisKey[] {""}, scriptArgs);
+            _redisDb.ScriptEvaluate(luaScript, null, scriptArgs);
 
-            _inProcessCache.Remove(key);
+            _caches.Remove(key);
         }
 
         public override void Clear()
