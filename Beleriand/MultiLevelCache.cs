@@ -232,7 +232,41 @@ namespace Beleriand
 
         public override void Set<T>(Dictionary<string, T> values)
         {
-            throw new System.NotImplementedException();
+            var itemCount = values.Count;
+
+            if (itemCount == 0)
+                throw new Exception("Values must not be null");
+
+            var timestamp = Stopwatch.GetTimestamp() - 1;
+
+            var keyValuePairString = values.Select((data, index) => $"KEYS[{index + 1}], ARGV[{index + 1}]");
+
+            var parameters = string.Join(",", keyValuePairString);
+
+            var multipleValueSetLuaScript = $"redis.call('MSET', {parameters})";
+
+            RedisKey[] redisKeys = values.Keys.Select(a => new RedisKey(a)).ToArray();
+            RedisValue[] redisValues =
+                values.Values.Select(a => new RedisValue(JsonConvert.SerializeObject(a))).ToArray();
+
+            _redisDb.ScriptEvaluate(multipleValueSetLuaScript, redisKeys, redisValues);
+
+            string publishScript = string.Empty;
+            var scriptArgs = new RedisValue[itemCount];
+
+            var insertedIndex = 1;
+            foreach (var keyValuePair in values)
+            {
+                var keyHashSlot = HashSlotCalculator.CalculateHashSlot(keyValuePair.Key);
+
+                publishScript += $"redis.call('PUBLISH', KEYS[1], ARGV[{insertedIndex}])";
+                scriptArgs[insertedIndex - 1] = DataSyncMessage.Create(_instanceId, keyHashSlot).Serialize();
+                _caches.Add(keyValuePair.Key, new LocalCacheEntry<object>(keyHashSlot, timestamp, keyValuePair.Value));
+
+                insertedIndex++;
+            }
+
+            _redisDb.ScriptEvaluate(publishScript, new RedisKey[] {SyncChannelName}, scriptArgs);
         }
 
         public override void Remove(string key)
@@ -254,7 +288,17 @@ namespace Beleriand
 
         public override void Clear()
         {
-            throw new System.NotImplementedException();
+            var scriptArgs = new RedisValue[3];
+            scriptArgs[0] = ClearSyncChannelName;
+            scriptArgs[1] = DataSyncMessage.Create(_instanceId).Serialize();
+            scriptArgs[2] = $"{Name}:*";
+
+            string luaScript = @"
+                    redis.call('del', unpack(redis.call('keys', ARGV[3])))
+                    redis.call('PUBLISH', ARGV[1], ARGV[2])
+                  ";
+
+            _redisDb.ScriptEvaluate(luaScript, null, scriptArgs);
         }
     }
 }
