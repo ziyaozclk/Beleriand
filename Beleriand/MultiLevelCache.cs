@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using Beleriand.Core;
+using Beleriand.Extensions;
 using Newtonsoft.Json;
 using StackExchange.Redis;
 
@@ -17,17 +18,18 @@ namespace Beleriand
 
         private long[] _lastUpdated = new long[HashSlotCount];
 
-        private readonly IDatabase _redisDb;
         private readonly Dictionary<string, object> _caches;
 
         private readonly Guid _instanceId = Guid.NewGuid();
 
+        private readonly IDatabase _redisDb;
+
         public MultiLevelCache(string name, ConnectionMultiplexer connectionMultiplexer) : base(name)
         {
+            _caches = new Dictionary<string, object>();
+
             _redisDb = connectionMultiplexer.GetDatabase();
 
-            _caches = new Dictionary<string, object>();
-            
             connectionMultiplexer.GetSubscriber()
                 .Subscribe(SyncChannelName, DataSynchronizationMessageHandler);
             connectionMultiplexer.GetSubscriber()
@@ -79,12 +81,12 @@ namespace Beleriand
         public override T GetOrDefault<T>(string key)
         {
             key = GetLocalizedKey(key);
-            
+
             var timestamp = Stopwatch.GetTimestamp() - 1;
 
             int keyHashSlot = -1;
 
-            if (_caches.GetValueOrDefault(key) is LocalCacheEntry<T> inProcessCacheEntry)
+            if (_caches.GetOrDefault(key) is LocalCacheEntry<T> inProcessCacheEntry)
             {
                 keyHashSlot = inProcessCacheEntry.KeyHashSlot;
 
@@ -92,7 +94,7 @@ namespace Beleriand
                 {
                     if (_lastUpdated[keyHashSlot] < inProcessCacheEntry.Timestamp)
                     {
-                        return (T) inProcessCacheEntry.Data;
+                        return inProcessCacheEntry.Data;
                     }
                 }
             }
@@ -105,23 +107,21 @@ namespace Beleriand
                 return result;
               ";
 
-            var results = (RedisValue[]) _redisDb.ScriptEvaluate(luaScript, new RedisKey[] {key});
+            var result = (RedisValue[]) _redisDb.ScriptEvaluate(luaScript, new RedisKey[] {key});
 
-            if (!results[0].IsNull)
+            if (result.Length != 0)
             {
-                var serializedData = (string) results[0];
+                value = JsonConvert.DeserializeObject<T>(result.First());
+            }
 
-                if (serializedData.Length > 0)
+            if (value != null)
+            {
+                if (keyHashSlot == -1)
                 {
-                    value = JsonConvert.DeserializeObject<T>(serializedData);
-
-                    if (keyHashSlot == -1)
-                    {
-                        keyHashSlot = HashSlotCalculator.CalculateHashSlot(key);
-                    }
-
-                    _caches.TryAdd(key, new LocalCacheEntry<T>((ushort) keyHashSlot, timestamp, value));
+                    keyHashSlot = HashSlotCalculator.CalculateHashSlot(key);
                 }
+
+                _caches.AddOrUpdate(key, new LocalCacheEntry<T>((ushort) keyHashSlot, timestamp, value));
             }
 
             return value;
@@ -130,19 +130,21 @@ namespace Beleriand
         public override Dictionary<string, T> GetOrDefault<T>(List<string> keys)
         {
             keys = keys.Select(GetLocalizedKey).ToList();
-            
-            Dictionary<string, T> returnMap = new Dictionary<string, T>();
+
+            Dictionary<string, T> resultMap = new Dictionary<string, T>();
+
+            Dictionary<string, int> keyHashSlotMap = new Dictionary<string, int>();
 
             var timestamp = Stopwatch.GetTimestamp() - 1;
 
-            int keyHashSlot = -1;
-
             List<int> foundIndexList = new List<int>();
 
-            int index = 0;
+            var foundIndex = 0;
             foreach (var key in keys)
             {
-                if (_caches.GetValueOrDefault(key) is LocalCacheEntry<T> inProcessCacheEntry)
+                int keyHashSlot = -1;
+
+                if (_caches.GetOrDefault(key) is LocalCacheEntry<T> inProcessCacheEntry)
                 {
                     keyHashSlot = inProcessCacheEntry.KeyHashSlot;
 
@@ -150,18 +152,20 @@ namespace Beleriand
                     {
                         if (_lastUpdated[keyHashSlot] < inProcessCacheEntry.Timestamp)
                         {
-                            foundIndexList.Add(index);
-                            returnMap.Add(key, inProcessCacheEntry.Data);
+                            foundIndexList.Add(foundIndex);
+                            resultMap.Add(key, inProcessCacheEntry.Data);
                         }
                     }
                 }
 
-                index++;
+                keyHashSlotMap.Add(key, keyHashSlot);
+
+                foundIndex++;
             }
 
             if (foundIndexList.Count == keys.Count)
             {
-                return returnMap;
+                return resultMap;
             }
 
             var notFoundKeys = keys.Where((a, i) => !foundIndexList.Contains(i)).ToList();
@@ -172,34 +176,29 @@ namespace Beleriand
                   for i, key in ipairs(ARGV) do results[i] = values[i] end;
                   return results";
 
-            var results =
-                (RedisValue[]) _redisDb.ScriptEvaluate(luaScript, null,
-                    notFoundKeys.Select(a => new RedisValue(a)).ToArray());
+            var redisValues = (RedisValue[]) _redisDb.ScriptEvaluate(luaScript, null,
+                keys.Select(a => new RedisValue(a)).ToArray());
 
-            var newIndex = 0;
-            foreach (var redisValue in results)
+            var values = redisValues.Select(a => JsonConvert.DeserializeObject<T>(a)).ToList();
+
+            var notFoundIndex = 0;
+            foreach (var value in values)
             {
-                var serializedData = (string) redisValue;
+                var key = notFoundKeys.ElementAt(notFoundIndex);
 
-                if (!string.IsNullOrEmpty(serializedData))
+                int keyHashSlot = keyHashSlotMap.GetOrDefault(key);
+
+                if (keyHashSlot == -1)
                 {
-                    var key = notFoundKeys.ElementAt(newIndex);
-                    var value = JsonConvert.DeserializeObject<T>(serializedData);
-
-                    returnMap.Add(key, value);
-
-                    if (keyHashSlot == -1)
-                    {
-                        keyHashSlot = HashSlotCalculator.CalculateHashSlot(key);
-                    }
-
-                    _caches.TryAdd(key, new LocalCacheEntry<T>((ushort) keyHashSlot, timestamp, value));
+                    keyHashSlot = HashSlotCalculator.CalculateHashSlot(key);
                 }
 
-                newIndex++;
+                resultMap.Add(key, value);
+                _caches.AddOrUpdate(key, new LocalCacheEntry<T>((ushort) keyHashSlot, timestamp, value));
+                notFoundIndex++;
             }
 
-            return returnMap;
+            return resultMap;
         }
 
         public override void Set<T>(string key, T value)
@@ -213,20 +212,18 @@ namespace Beleriand
 
             var keyHashSlot = HashSlotCalculator.CalculateHashSlot(key);
 
-            string serializedData = JsonConvert.SerializeObject(value);
+            var publishValue = DataSyncMessage.Create(_instanceId, keyHashSlot).Serialize();
 
             string luaScript = @"
                     redis.call('SET', KEYS[1], ARGV[1])
                     redis.call('PUBLISH', ARGV[2], ARGV[3])
                   ";
 
-            var scriptArgs = new RedisValue[3];
-            scriptArgs[0] = serializedData;
-            scriptArgs[1] = SyncChannelName;
-            scriptArgs[2] = DataSyncMessage.Create(_instanceId, keyHashSlot).Serialize();
+            var serializeValue = JsonConvert.SerializeObject(value);
 
-            _redisDb.ScriptEvaluate(luaScript, new RedisKey[] {key}, scriptArgs);
-            _caches.TryAdd(key, new LocalCacheEntry<T>(keyHashSlot, timestamp, value));
+            _redisDb.ScriptEvaluate(luaScript, new RedisKey[] {key},
+                new RedisValue[] {serializeValue, SyncChannelName, publishValue});
+            _caches.AddOrUpdate(key, new LocalCacheEntry<T>(keyHashSlot, timestamp, value));
         }
 
         public override void Set<T>(Dictionary<string, T> values)
@@ -244,64 +241,63 @@ namespace Beleriand
 
             var multipleValueSetLuaScript = $"redis.call('MSET', {parameters})";
 
-            RedisKey[] redisKeys = values.Keys.Select(a => new RedisKey(GetLocalizedKey(a))).ToArray();
+            RedisKey[] redisKeys = values.Keys.Select(a => new RedisKey(a)).ToArray();
             RedisValue[] redisValues =
                 values.Values.Select(a => new RedisValue(JsonConvert.SerializeObject(a))).ToArray();
 
             _redisDb.ScriptEvaluate(multipleValueSetLuaScript, redisKeys, redisValues);
 
-            string publishScript = string.Empty;
             var scriptArgs = new RedisValue[itemCount];
 
-            var insertedIndex = 1;
+            string publishLuaScript = string.Empty;
+            var insertIndex = 0;
             foreach (var keyValuePair in values)
             {
                 var key = GetLocalizedKey(keyValuePair.Key);
-                
+
                 var keyHashSlot = HashSlotCalculator.CalculateHashSlot(key);
 
-                publishScript += $"redis.call('PUBLISH', KEYS[1], ARGV[{insertedIndex}])";
-                scriptArgs[insertedIndex - 1] = DataSyncMessage.Create(_instanceId, keyHashSlot).Serialize();
-                _caches.TryAdd(key, new LocalCacheEntry<object>(keyHashSlot, timestamp, keyValuePair.Value));
+                var publishValue = DataSyncMessage.Create(_instanceId, keyHashSlot).Serialize();
 
-                insertedIndex++;
+                scriptArgs[insertIndex] = publishValue;
+
+                publishLuaScript += $"redis.call('PUBLISH', KEYS[1], ARGV[{insertIndex + 1}])";
+
+                _caches.AddOrUpdate(key, new LocalCacheEntry<object>(keyHashSlot, timestamp, keyValuePair.Value));
+
+                insertIndex++;
             }
 
-            _redisDb.ScriptEvaluate(publishScript, new RedisKey[] {SyncChannelName}, scriptArgs);
+            _redisDb.ScriptEvaluate(publishLuaScript, new RedisKey[] {SyncChannelName}, scriptArgs);
         }
 
         public override void Remove(string key)
         {
             key = GetLocalizedKey(key);
-            
+
             var keyHashSlot = HashSlotCalculator.CalculateHashSlot(key);
 
-            var scriptArgs = new RedisValue[2];
-            scriptArgs[1] = SyncChannelName;
-            scriptArgs[2] = DataSyncMessage.Create(_instanceId, keyHashSlot).Serialize();
+            var publishValue = DataSyncMessage.Create(_instanceId, keyHashSlot).Serialize();
 
             string luaScript = @"
                     redis.call('PUBLISH', ARGV[1], ARGV[2])
                   ";
 
-            _redisDb.ScriptEvaluate(luaScript, null, scriptArgs);
-
+            _redisDb.ScriptEvaluate(luaScript, null, new RedisValue[] {SyncChannelName, publishValue});
             _caches.Remove(key);
         }
 
         public override void Clear()
         {
-            var scriptArgs = new RedisValue[3];
-            scriptArgs[0] = ClearSyncChannelName;
-            scriptArgs[1] = DataSyncMessage.Create(_instanceId).Serialize();
-            scriptArgs[2] = $"{Name}:*";
+            var publishValue = DataSyncMessage.Create(_instanceId).Serialize();
 
             string luaScript = @"
-                    redis.call('del', unpack(redis.call('keys', ARGV[3])))
+                    redis.call('del', unpack(redis.call('keys', KEYS[1])))
                     redis.call('PUBLISH', ARGV[1], ARGV[2])
                   ";
 
-            _redisDb.ScriptEvaluate(luaScript, null, scriptArgs);
+            _redisDb.ScriptEvaluate(luaScript, new RedisKey[] {$"{Name}:*"},
+                new RedisValue[] {ClearSyncChannelName, publishValue});
         }
     }
 }

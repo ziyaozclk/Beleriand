@@ -16,5 +16,19 @@ namespace Beleriand.Extensions
                 values.Add(kvp);
             }
         }
+        
+        public static void AddOrUpdate(this IDictionary<string, object> instance, string key, object value, bool replaceExisting = true)
+        {
+            if (replaceExisting || !instance.ContainsKey(key))
+            {
+                instance[key] = value;
+            }
+        }
+        
+        public static TValue GetOrDefault<TKey, TValue>(this IDictionary<TKey, TValue> dictionary, TKey key)
+        {
+            TValue obj;
+            return dictionary.TryGetValue(key, out obj) ? obj : default(TValue);
+        }
     }
 }
