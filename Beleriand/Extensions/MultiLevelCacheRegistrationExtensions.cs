@@ -8,8 +8,7 @@ namespace Beleriand.Extensions
         public static void UseBeleriand(this IServiceCollection services, ICachingConfiguration configuration,
             string redisConnectionString)
         {
-            services.AddSingleton(provider =>
-                new MultiLevelCacheManager(configuration, redisConnectionString));
+            services.AddSingleton(new MultiLevelCacheManager(configuration, redisConnectionString));
         }
     }
 }

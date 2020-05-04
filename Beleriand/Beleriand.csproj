@@ -2,10 +2,15 @@
 
     <PropertyGroup>
         <TargetFramework>netcoreapp2.2</TargetFramework>
+        <PackageId>Beleriand</PackageId>
+        <Version>1.0.0</Version>
+        <Authors>Ziya Özçelik</Authors>
+        <Company>hepsiburada</Company>
+        <IsPackable>true</IsPackable>
     </PropertyGroup>
 
     <ItemGroup>
-      <PackageReference Include="Microsoft.Extensions.Caching.Memory" Version="2.2.0" />
+      <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="2.1.1" />
       <PackageReference Include="Newtonsoft.Json" Version="12.0.3" />
       <PackageReference Include="Nito.AsyncEx" Version="5.0.0" />
       <PackageReference Include="StackExchange.Redis" Version="2.1.30" />
