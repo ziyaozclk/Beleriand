@@ -107,21 +107,26 @@ namespace Beleriand
                 return result;
               ";
 
-            var result = (RedisValue[]) _redisDb.ScriptEvaluate(luaScript, new RedisKey[] {key});
+            var results = (RedisValue[]) _redisDb.ScriptEvaluate(luaScript, new RedisKey[] {key});
 
-            if (result.Length != 0)
+            if (!results[0].IsNull)
             {
-                value = JsonConvert.DeserializeObject<T>(result.First());
-            }
+                var serializedData = (string) results[0];
 
-            if (value != null)
-            {
-                if (keyHashSlot == -1)
+                if (serializedData.Length > 0)
                 {
-                    keyHashSlot = HashSlotCalculator.CalculateHashSlot(key);
-                }
+                    value = JsonConvert.DeserializeObject<T>(serializedData);
 
-                _caches.AddOrUpdate(key, new LocalCacheEntry<T>((ushort) keyHashSlot, timestamp, value));
+                    if (value != null)
+                    {
+                        if (keyHashSlot == -1)
+                        {
+                            keyHashSlot = HashSlotCalculator.CalculateHashSlot(key);
+                        }
+
+                        _caches.AddOrUpdate(key, new LocalCacheEntry<T>((ushort) keyHashSlot, timestamp, value));
+                    }
+                }
             }
 
             return value;
@@ -179,7 +184,17 @@ namespace Beleriand
             var redisValues = (RedisValue[]) _redisDb.ScriptEvaluate(luaScript, null,
                 keys.Select(a => new RedisValue(a)).ToArray());
 
-            var values = redisValues.Select(a => JsonConvert.DeserializeObject<T>(a)).ToList();
+            var values = redisValues.Where(s => !s.IsNull).Select(a =>
+            {
+                var serializedData = (string) a;
+
+                if (serializedData.Length > 0)
+                {
+                    return JsonConvert.DeserializeObject<T>(serializedData);
+                }
+
+                return default;
+            }).ToList();
 
             var notFoundIndex = 0;
             foreach (var value in values)
